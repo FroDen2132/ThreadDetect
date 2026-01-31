@@ -1,62 +1,63 @@
-# logger.py (GÜNCELLENMİŞ VERSİYON)
+# logger.py - LOGLAMA SISTEMI
 import logging
-import sys
 from datetime import datetime
 
 class GuvenlikLogger:
-    def __init__(self, log_file="guvenlik_loglari.txt"):
-        # Dosyaya yazarken UTF-8 kullanmasını söylüyoruz
-        self.logger = logging.getLogger("GuvenlikLog")
+    def __init__(self):
+        self.logger = logging.getLogger("SecOpsLogger")
         self.logger.setLevel(logging.INFO)
-        
-        # Eğer daha önce handler eklendiyse temizle (tekrarı önler)
-        if self.logger.hasHandlers():
-            self.logger.handlers.clear()
+        if self.logger.hasHandlers(): self.logger.handlers.clear()
 
-        # Dosya Ayarları (UTF-8 Encoding Eklendi)
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setFormatter(logging.Formatter('%(message)s'))
+        # UTF-8 Encoding ile dosyaya yazma
+        file_handler = logging.FileHandler('guvenlik_loglari.txt', encoding='utf-8')
+        formatter = logging.Formatter('%(message)s')
+        file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
 
-        # Konsol Ayarları (Windows için encoding düzeltmesi gerekebilir)
-        # Genellikle Python 3.7+ otomatik halleder ama emin olalım.
-        self.console_enabled = True
+    def log_threat(self, features, score, process_list, network_map=None):
+        """Tehditleri ve ağ bilgilerini loglar."""
+        try:
+            if hasattr(features, 'shape') and len(features.shape) == 2:
+                veri = features[0]
+            elif isinstance(features, list) and len(features) == 1:
+                 veri = features[0]
+            else: veri = features
+        except: veri = [0,0,0,0,0]
 
-    def log_normal(self, message):
-        # Ekrana basarken flush=True ile anlık yazmasını sağlıyoruz
-        print(f"\r[OK] {message}", end="", flush=True)
-
-    def log_threat(self, features, score, top_processes):
+        cpu = veri[0] if len(veri)>0 else 0
+        ram = veri[1] if len(veri)>1 else 0
+        disk = veri[2] if len(veri)>2 else 0
+        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        culprit = top_processes[0] if top_processes else {'name': 'Bilinmiyor', 'pid': 0, 'cpu_percent': 0}
-
-        # Rapor metni
-        rapor = (
-            f"\n\n{'='*50}\n"
-            f"[!!!] GÜVENLİK UYARISI - ANOMALİ TESPİT EDİLDİ\n"
-            f"{'='*50}\n"
+        msg = (
+            f"==================================================\n"
+            f"[!!!] GÜVENLİK UYARISI - TEHDİT DETAYI\n"
+            f"==================================================\n"
             f"Tarih/Saat  : {timestamp}\n"
-            f"Risk Skoru  : {score:.4f}\n"
+            f"Risk Skoru  : {score:.4f} (Negatif = Riskli)\n"
+            f"Sistem      : CPU %{cpu:.1f} | RAM %{ram:.1f} | Disk {disk:.1f}\n"
             f"--------------------------------------------------\n"
-            f"SİSTEM DURUMU:\n"
-            f" - CPU Yükü   : %{features[0]}\n"
-            f" - RAM Yükü   : %{features[1]}\n"
-            f" - Aktif İşlem: {features[4]} adet\n"
-            f"--------------------------------------------------\n"
-            f"ŞÜPHELİ AKTİVİTE KAYNAĞI:\n"
-            f" 1. {culprit['name']} (PID: {culprit['pid']}) -> %{culprit['cpu_percent']} CPU\n"
-            f"--------------------------------------------------\n"
-            f"ÖNERİLEN AKSİYON: '{culprit['name']}' işlemini sonlandırın.\n"
-            f"{'='*50}\n"
+            f"ŞÜPHELİ İŞLEM VE AĞ ANALİZİ:\n"
         )
+
+        if process_list:
+            for i, p in enumerate(process_list):
+                pid = p['pid']
+                mb_write = p.get('disk_write', 0) / 1024 / 1024
+                
+                # Ağ bilgilerini formatla
+                net_info = "Veri Yok / Bağlantı Yok"
+                if network_map and pid in network_map:
+                    net_info = ", ".join(network_map[pid])
+
+                msg += (f" {i+1}. {p['name']} (PID: {pid})\n"
+                        f"    -> Kaynak: CPU %{p['cpu_percent']} | RAM %{p['memory_percent']:.1f}\n"
+                        f"    -> Disk Yazma: {mb_write:.2f} MB\n"
+                        f"    -> [AĞ BAĞLANTILARI]: {net_info}\n")
         
-        # Ekrana bas
-        try:
-            print(rapor)
-        except UnicodeEncodeError:
-            # Eğer terminal Türkçe desteklemiyorsa karakterleri düzeltip bas
-            print(rapor.encode('ascii', 'replace').decode('ascii'))
-            
-        # Dosyaya kaydet
-        self.logger.warning(rapor)
+        msg += "==================================================\n"
+        self.logger.info(msg)
+
+    def log_normal(self, message):
+        self.logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}")
