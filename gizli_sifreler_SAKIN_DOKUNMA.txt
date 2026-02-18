@@ -1,4 +1,0 @@
-Bu dosya bir siber guvenlik tuzagidir (Honeypot).
-Buna erisen herhangi bir islem loglanacaktir.
-User: Admin
-Pass: SuperSecret123

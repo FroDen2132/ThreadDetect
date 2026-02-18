@@ -1,0 +1,46 @@
+# ==============================
+# ThreadDetector .gitignore
+# ==============================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# --- Sanal Ortam ---
+venv/
+env/
+.venv/
+.env/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Model & Veri Dosyaları ---
+*.pkl
+*.npy
+*.joblib
+
+# --- Log Dosyaları ---
+logs/
+*.log
+guvenlik_loglari.txt
+
+# --- Honeypot ---
+gizli_sifreler_SAKIN_DOKUNMA.txt
+
+# --- İşletim Sistemi ---
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# --- Dağıtım ---
+dist/
+build/
+*.egg-info/
