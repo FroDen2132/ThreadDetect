@@ -29,7 +29,8 @@ class DLLMonitor:
     }
 
     def __init__(self, config=None):
-        self.config = config
+        from config import Config
+        self.config = config or Config()
         self.calisiyor: bool = False
         self.thread: threading.Thread | None = None
         self.alarmlar: list[str] = []
@@ -56,6 +57,12 @@ class DLLMonitor:
     def _dll_supheli_mi(self, dll_path):
         """Bir DLL'in şüpheli dizinden yüklenip yüklenmediğini kontrol eder."""
         dll_lower = dll_path.lower()
+        
+        # Whitelist kontrolü
+        for w_path in self.config.whitelist_paths:
+            if dll_lower.startswith(w_path.lower()):
+                return False, ""
+
         for dizin in self.SUPHELI_DIZINLER:
             if dizin in dll_lower:
                 return True, f"Şüpheli dizin: {dizin.strip(chr(92))}"
@@ -76,7 +83,7 @@ class DLLMonitor:
                 pid = proc.info['pid']
                 name = proc.info['name']
 
-                if name in self.GUVENLI_ISLEMLER or pid <= 4:
+                if name in self.config.ignore_process_names or pid <= 4:
                     continue
 
                 guncel_dlls = self._process_dll_listesi(pid)

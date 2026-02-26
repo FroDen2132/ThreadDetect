@@ -208,7 +208,7 @@ class SistemGozlemcisi:
     # =====================================================
     # ŞÜPHELİ İŞLEM TESPİTİ (ANA FONKSİYON)
     # =====================================================
-    def supheli_islemleri_getir(self):
+    def supheli_islemleri_getir(self, ai_motor=None, is_training=False):
         pid_baglanti_sayilari = Counter()
         try:
             for c in psutil.net_connections(kind='inet'):
@@ -217,9 +217,10 @@ class SistemGozlemcisi:
             pass
 
         guncel_islemler = []
+        process_egitim_verileri = []
 
         for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent',
-                                          'io_counters', 'exe', 'cmdline']):
+                                          'io_counters', 'exe', 'cmdline', 'num_threads']):
             try:
                 p = proc.info
                 pid = p['pid']
@@ -227,12 +228,38 @@ class SistemGozlemcisi:
                 exe_path = p['exe']
                 cmd_line = " ".join(p['cmdline']) if p['cmdline'] else ""
 
-                if pid == 0 or pid == 4 or name in self.config.ignore_process_names:
+                # --- GÜVENLİ LİSTEYİ ATLA (AMMA ENJEKSİYONU TAKİP ET) ---
+                # İgnore listesinde olsa bile thread injection yiyip yemediğine bakalım.
+                # Whitelisted bir process injection yediği an whitelist'ten çıkmalıdır!
+                is_ignored = name in self.config.ignore_process_names
+                thread_alarm, thread_degisim, thread_toplam = self.thread_degisim_kontrol(pid)
+                
+                if is_ignored and not thread_alarm:
+                    # Gerçekten temiz ve ignore listesindeyse tamamen atla
+                    if pid == 0 or pid == 4:
+                        continue
+                    # Cache'i güncellemek için devam ediyoruz ama analiz etmiyoruz
                     continue
+                    
+                if pid == 0 or pid == 4:
+                    continue
+
+                # --- WHITELIST KONTROLÜ ---
+                is_whitelisted = False
+                if exe_path:
+                    exe_lower = exe_path.lower()
+                    for w_path in self.config.whitelist_paths:
+                        if exe_lower.startswith(w_path.lower()):
+                            is_whitelisted = True
+                            break
+                            
+                # Eğer ignore listesindeki bir program injection yemişse whitelist indirimini yak!
+                if is_ignored and thread_alarm:
+                    is_whitelisted = False
 
                 # --- YARA TARAMASI ---
                 yara_sonuc = []
-                should_scan = (pid not in self.taranan_pidler) or (p['cpu_percent'] > 80)
+                should_scan = ((pid not in self.taranan_pidler) or (p['cpu_percent'] > 80)) and not is_whitelisted
 
                 if self.yara_rules and exe_path and should_scan:
                     try:
@@ -318,10 +345,46 @@ class SistemGozlemcisi:
                     risk_detay.append("NEW_PROCESS_ACTIVE")
 
                 # Thread injection
-                thread_alarm, thread_degisim, thread_toplam = self.thread_degisim_kontrol(pid)
                 if thread_alarm:
                     risk_puan += 300
                     risk_detay.append(f"THREAD_SPIKE:+{thread_degisim}")
+                    if is_ignored:
+                        risk_puan += 500  # Güvenilir bir sürecin içine girilmeye çalışılması ekstra ceza
+                        risk_detay.append(f"WHITELIST_INJECTION_ATTEMPT")
+
+                # Whitelist indirimi
+                if is_whitelisted:
+                    risk_puan = risk_puan * 0.1  # %90 risk indirimi
+                    risk_detay.append("WHITELISTED_PATH")
+
+                # =================================================
+                # SÜREÇ BAZLI YAPAY ZEKA (PROCESS-LEVEL AI)
+                # =================================================
+                # Thread bilgisini p nesnesinden veya kontrolden alalım
+                thr_count = p.get('num_threads', thread_toplam if thread_toplam > 0 else 1)
+                
+                process_vektoru = np.array([[
+                    float(p['cpu_percent']), 
+                    float(p['memory_percent']), 
+                    float(disk_mb_sn), 
+                    float(baglanti_sayisi),
+                    float(thr_count)
+                ]])
+                
+                if is_training:
+                    # Eğitim sırasında veriyi topla (Sadece efor sarfeden veya belirli yükü olan süreçler temiz modelimizi bozmasın diye hafif bir filtreleme de yapabiliriz ama isolation forest her şeyi alır)
+                    process_egitim_verileri.append(process_vektoru)
+                elif ai_motor and ai_motor.process_is_trained:
+                    # Analiz sırasında modele sor
+                    _, ai_proc_skor = ai_motor.process_analiz_et(process_vektoru)
+                    
+                    # Eğer AI anomali saptadıysa (skor negatifse) risk skoruna ciddi bir ceza kes
+                    if ai_proc_skor < -0.1:
+                        risk_puan += 80
+                        risk_detay.append(f"AI_PROCESS_ANOMALY({ai_proc_skor:.2f})")
+                    elif ai_proc_skor < -0.05:
+                        risk_puan += 40
+                        risk_detay.append(f"AI_PROCESS_SUSPICIOUS({ai_proc_skor:.2f})")
 
                 guncel_islemler.append({
                     'pid': pid,
@@ -353,4 +416,8 @@ class SistemGozlemcisi:
             self.taranan_pidler.clear()
 
         guncel_islemler.sort(key=lambda x: float(x['risk_score']), reverse=True)
-        return guncel_islemler[:self.config.max_riskli_islem]
+        
+        if is_training:
+            return process_egitim_verileri
+        else:
+            return guncel_islemler[:self.config.max_riskli_islem]

@@ -108,6 +108,11 @@ class FileMonitor:
 
     def _dizin_karsilastir(self, dizin):
         """Dizinin mevcut ve önceki durumunu karşılaştırır."""
+        # Whitelist kontrolü (dizin için)
+        dizin_lower = dizin.lower()
+        if any(dizin_lower.startswith(w.lower()) for w in self.config.whitelist_paths):
+            return
+
         guncel = self._snapshot_al(dizin)
         onceki = self.dizin_snapshot.get(dizin, {})
 
@@ -134,6 +139,10 @@ class FileMonitor:
             # Şüpheli yeni dosyalar
             for d in yeni_dosyalar:
                 ext = d.get('ext', '')
+                # Whitelisted uzantı kontrolü
+                if ext in self.config.whitelist_extensions:
+                    continue
+                
                 if ext in self.SUPHELI_UZANTILAR:
                     self.alarmlar.append(
                         f"ŞÜPHELİ DOSYA OLUŞTURULDU: {d['path']} (Çalıştırılabilir dosya!)"
@@ -162,6 +171,13 @@ class FileMonitor:
             def on_created(self, event):
                 if not event.is_directory:
                     ext = os.path.splitext(event.src_path)[1].lower()
+                    
+                    # Whitelist uzantı veya path kontrolü
+                    if ext in monitor.config.whitelist_extensions:
+                        return
+                    if any(event.src_path.lower().startswith(w.lower()) for w in monitor.config.whitelist_paths):
+                        return
+
                     if ext in FileMonitor.SUPHELI_UZANTILAR:
                         with monitor.lock:
                             monitor.alarmlar.append(
@@ -175,11 +191,17 @@ class FileMonitor:
 
             def on_deleted(self, event):
                 if not event.is_directory:
+                    # Whitelist kontrolü
+                    if any(event.src_path.lower().startswith(w.lower()) for w in monitor.config.whitelist_paths):
+                        return
                     with monitor.lock:
                         monitor.degisim_sayaci[int(time.time() / monitor.config.ransomware_pencere)] += 1
 
             def on_modified(self, event):
                 if not event.is_directory:
+                    # Whitelist kontrolü
+                    if any(event.src_path.lower().startswith(w.lower()) for w in monitor.config.whitelist_paths):
+                        return
                     with monitor.lock:
                         monitor.degisim_sayaci[int(time.time() / monitor.config.ransomware_pencere)] += 1
 

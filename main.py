@@ -15,6 +15,7 @@ from sniffer import AgKoklayici
 from registry_monitor import RegistryMonitor
 from dll_monitor import DLLMonitor
 from file_monitor import FileMonitor
+from api_monitor import ApiMonitor
 
 # =====================================================
 # RENK DESTEĞİ (colorama opsiyonel)
@@ -85,6 +86,7 @@ def main():
     parser.add_argument('--auto', action='store_true', help='Menü göstermeden otomatik başlat')
     parser.add_argument('--retrain', action='store_true', help='Modeli sıfırla ve baştan eğit')
     parser.add_argument('--debug', action='store_true', help='Debug modu')
+    parser.add_argument('--duration', type=int, default=0, help='Otomatik durma süresi (saniye, 0=sınırsız)')
     args = parser.parse_args()
 
     banner()
@@ -94,6 +96,8 @@ def main():
     config = Config()
     if args.debug:
         config.debug_mode = True
+    if args.duration > 0:
+        config.oturum_suresi = args.duration
 
     # --- MODÜLLERİ BAŞLAT ---
     print(f"\n{Fore.CYAN}[*] Modüller Yükleniyor...{Style.RESET_ALL}")
@@ -105,15 +109,19 @@ def main():
     registry_mon = RegistryMonitor(config)
     dll_mon = DLLMonitor(config)
     dosya_mon = FileMonitor(config)
+    api_mon = ApiMonitor(config, loglayici)
 
-    print(f"\n{Fore.GREEN}{Style.BRIGHT}--- ThreadDetector v2.0 (PID: {KENDI_PID}) ---{Style.RESET_ALL}")
+    print(f"\n{Fore.GREEN}{Style.BRIGHT}--- ThreadDetector v3.0 (PID: {KENDI_PID}) ---{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[!] MOD: FULL SPECTRUM{Style.RESET_ALL}")
-    print(f"    Process + Network + AI + YARA + Registry + DLL + FileSystem\n")
+    print(f"    Process + Network + AI + YARA + Registry + DLL + FileSystem")
+    if config.oturum_suresi > 0:
+        print(f"    {Fore.CYAN}Otomatik durma: {config.oturum_suresi} saniye{Style.RESET_ALL}")
+    print()
 
     # Log sistemi başladığını kaydet
-    loglayici.log_system("ThreadDetector v2.0 başlatıldı", "INFO", {
+    loglayici.log_system("ThreadDetector v3.0 başlatıldı", "INFO", {
         "pid": KENDI_PID,
-        "modules": ["monitor", "ai_brain", "sniffer", "registry", "dll", "file_monitor"]
+        "modules": ["monitor", "ai_brain", "sniffer", "registry", "dll", "file_monitor", "api_monitor"]
     })
 
     # --- SNIFFER BAŞLAT ---
@@ -158,6 +166,7 @@ def main():
         print(f"\n{Fore.MAGENTA}[*] ORTAM ÖĞRENİLİYOR ({egitim_suresi} Sn)...{Style.RESET_ALL}")
         t_end = time.time() + egitim_suresi
         veri_havuzu = []
+        process_veri_havuzu = []
 
         # Cache ısıtma
         for _ in range(5):
@@ -168,14 +177,19 @@ def main():
         while time.time() < t_end:
             v = gozlemci.veri_topla()
             veri_havuzu.append(v)
-            gozlemci.supheli_islemleri_getir()
+            
+            p_veriler = gozlemci.supheli_islemleri_getir(is_training=True)
+            if p_veriler:
+                process_veri_havuzu.extend(p_veriler)
+                
             kalan = int(t_end - time.time())
             sys.stdout.write(f"\r{Fore.MAGENTA}[*] Veri: {len(veri_havuzu)} | Kalan: {kalan}sn   {Style.RESET_ALL}")
             sys.stdout.flush()
             time.sleep(0.2)
 
         beyin.egit(veri_havuzu)
-        loglayici.log_system(f"AI model eğitimi tamamlandı ({len(veri_havuzu)} örnek)", "INFO")
+        beyin.process_egit(process_veri_havuzu)
+        loglayici.log_system(f"AI model eğitimi tamamlandı ({len(veri_havuzu)} sistem, {len(process_veri_havuzu)} process örneği)", "INFO")
     else:
         print(f"{Fore.GREEN}[+] AI Zekası Yüklendi.{Style.RESET_ALL}")
 
@@ -197,7 +211,17 @@ def main():
     # ANA GÖZLEM DÖNGÜSÜ
     # =====================================================
     try:
+        oturum_baslangic = time.time()
+        toplam_tehdit = 0
+
         while not kapatiliyor:
+            # Otomatik durma kontrolü
+            if config.oturum_suresi > 0:
+                gecen_sure = time.time() - oturum_baslangic
+                if gecen_sure >= config.oturum_suresi:
+                    print(f"\n{Fore.YELLOW}[*] Oturum süresi doldu ({config.oturum_suresi}sn). Otomatik durduruluyor...{Style.RESET_ALL}")
+                    break
+
             tehdit_var = False
 
             # =========================================
@@ -261,7 +285,7 @@ def main():
             # =========================================
             # 7. İŞLEM (PROCESS) ANALİZİ
             # =========================================
-            supheliler = gozlemci.supheli_islemleri_getir()
+            supheliler = gozlemci.supheli_islemleri_getir(ai_motor=beyin)
             en_riskli = [p for p in supheliler if p['pid'] != KENDI_PID]
 
             if en_riskli:
@@ -289,6 +313,10 @@ def main():
                     # Yeni süreç uyarısı
                     if hedef.get('is_new'):
                         print(f"  {Fore.MAGENTA}⚡ YENİ BAŞLATILMIŞ SÜREÇ{Style.RESET_ALL}")
+                        
+                    # Yüksek risk grubundaki işlemleri API de izlesin
+                    if api_mon.is_available() and risk_skoru > config.api_monitor_risk_esigi:
+                        api_mon.hook_process(pid, hedef['name'])
 
                     # LOG
                     loglayici.log_threat(veri, skor, [hedef], net_map, ai_rapor)
@@ -330,7 +358,25 @@ def main():
     registry_mon.durdur()
     dll_mon.durdur()
     dosya_mon.durdur()
-    loglayici.log_system("ThreadDetector kapatıldı", "INFO")
+    api_mon.detach_all()
+
+    # === OTURUM ÖZET RAPORU ===
+    oturum_suresi = time.time() - oturum_baslangic
+    ozet = loglayici.generate_summary(oturum_suresi)
+    if ozet:
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*60}{Style.RESET_ALL}")
+        print(f"  {Fore.CYAN}OTURUM ÖZET RAPORU{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        print(f"  Süre          : {int(oturum_suresi // 60)}dk {int(oturum_suresi % 60)}sn")
+        print(f"  Tehdit Sayısı  : {ozet.get('toplam_tehdit', 0)}")
+        print(f"  Ağ Alarmı     : {ozet.get('ag_alarm', 0)}")
+        print(f"  Registry      : {ozet.get('registry_alarm', 0)}")
+        print(f"  DLL           : {ozet.get('dll_alarm', 0)}")
+        print(f"  Dosya Sistemi : {ozet.get('dosya_alarm', 0)}")
+        print(f"  API Çağrısı   : {ozet.get('api_call', 0)}")
+        print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+
+    loglayici.log_system("ThreadDetector kapatıldı", "INFO", ozet)
     print(f"{Fore.GREEN}[+] Tüm modüller güvenle durduruldu.{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[+] Loglar kaydedildi: {config.log_dir}/{Style.RESET_ALL}")
 

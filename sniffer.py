@@ -4,6 +4,7 @@ from scapy.all import sniff, IP, TCP, UDP, Raw, DNS, DNSQR
 import threading
 import time
 import math
+import psutil
 from collections import defaultdict
 
 
@@ -13,8 +14,36 @@ class AgKoklayici:
     - Derin paket içerik taraması (DPI)
     - DNS sorgu analizi (DGA tespiti, şüpheli domain)
     - C2 Beacon tespiti (periyodik bağlantılar)
-    - Port anomali tespiti
+    - Port anomali tespiti (browser false-positive filtrelemeli)
     """
+
+    # Bilinen güvenli portlar — standart servisler
+    BILINEN_PORTLAR = {
+        20, 21, 22, 23, 25, 53, 67, 68, 80, 110, 123, 143,
+        443, 465, 587, 993, 995,
+        # Veritabanı
+        1433, 1521, 3306, 5432, 6379, 27017,
+        # Uzak masaüstü / VNC
+        3389, 5900, 5938,
+        # Web sunucu alternatifleri
+        8000, 8080, 8443, 8888,
+        # Cloudflare / CDN yüksek portları
+        2053, 2083, 2087, 2096,
+    }
+
+    # Tarayıcı (browser) süreç isimleri — bu süreçlerin yüksek port
+    # trafiği normal kabul edilir (QUIC, HTTP/3, CDN alt-svc vb.)
+    BROWSER_ISIMLERI = {
+        "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe",
+        "brave.exe", "vivaldi.exe", "iexplore.exe",
+        "chromium.exe", "safari.exe", "arc.exe",
+        # İlgili yardımcı süreçler
+        "chrome", "msedge", "firefox", "opera", "brave",
+    }
+
+    # Windows Ephemeral port aralığı (49152–65535)
+    EPHEMERAL_ALT = 49152
+    EPHEMERAL_UST = 65535
 
     def __init__(self, config=None):
         from config import Config
@@ -33,6 +62,64 @@ class AgKoklayici:
 
         # Port istatistikleri
         self.port_sayilari = defaultdict(int)         # port -> kullanım sayısı
+
+        # Port anomali rate-limiting: son alarm zamanı
+        self._port_alarm_zamanlari: dict[tuple[str, int], float] = {}
+        self._PORT_ALARM_COOLDOWN = 60   # aynı ip:port çifti için 60sn cooldown
+
+        # UDP/QUIC izleme
+        self.udp_port_sayilari: dict[int, int] = {}  # port -> kullanım sayısı
+        self._udp_alarm_zamanlari: dict[tuple[str, int], float] = {}
+
+        # Browser PID cache (periyodik güncellenir)
+        self._browser_pidler: set[int] = set()
+        self._browser_cache_zamani: float = 0.0
+        self._BROWSER_CACHE_TTL = 15  # 15 saniyede bir güncelle
+
+    # =====================================================
+    # BROWSER PID CACHE
+    # =====================================================
+    def _browser_pidleri_guncelle(self):
+        """Çalışan browser süreçlerinin PID'lerini cache'e alır."""
+        simdi = time.time()
+        if simdi - self._browser_cache_zamani < self._BROWSER_CACHE_TTL:
+            return  # Cache hâlâ geçerli
+
+        yeni_pidler = set()
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    isim = proc.info['name']
+                    if isim and isim.lower() in self.BROWSER_ISIMLERI:
+                        yeni_pidler.add(proc.info['pid'])
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception:
+            pass
+
+        self._browser_pidler = yeni_pidler
+        self._browser_cache_zamani = simdi
+
+    def _baglanti_browserdan_mi(self, paket):
+        """Paketin browser sürecinden gelip gelmediğini kontrol eder."""
+        self._browser_pidleri_guncelle()
+
+        if not self._browser_pidler:
+            return False
+
+        try:
+            if paket.haslayer(IP) and paket.haslayer(TCP):
+                src_ip = paket[IP].src
+                src_port = paket[TCP].sport
+
+                for conn in psutil.net_connections(kind='inet'):
+                    if (conn.pid in self._browser_pidler and
+                        conn.laddr and
+                        conn.laddr.port == src_port):
+                        return True
+        except Exception:
+            pass
+        return False
 
     # =====================================================
     # ENTROPY HESAPLAMA (DGA Tespiti için)
@@ -133,30 +220,126 @@ class AgKoklayici:
             pass
 
     # =====================================================
-    # PORT ANOMALİ TESPİTİ
+    # PORT ANOMALİ TESPİTİ (Browser-Aware)
     # =====================================================
     def port_anomali_kontrol(self, paket):
-        """Yaygın olmayan portlarda iletişimi tespit eder."""
+        """
+        Yaygın olmayan portlardaki iletişimi tespit eder.
+        
+        False Positive Önleme Katmanları:
+        1. Bilinen güvenli portlara giden trafik filtrelenir
+        2. Sadece SYN (yeni bağlantı) paketleri incelenir
+        3. Ephemeral port aralığı (49152-65535) sadece hedef olarak filtrelenir
+        4. Browser süreçlerinden gelen trafik muaf tutulur
+        5. Aynı ip:port çifti için cooldown uygulanır
+        """
         try:
-            if paket.haslayer(TCP) and paket.haslayer(IP):
-                dst_port = paket[TCP].dport
-                self.port_sayilari[dst_port] += 1
+            if not (paket.haslayer(TCP) and paket.haslayer(IP)):
+                return
 
-                # Bilinen portlar dışındaki trafik
-                bilinen_portlar = {
-                    20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587,
-                    993, 995, 3306, 3389, 5432, 5900, 8080, 8443
-                }
+            dst_port = paket[TCP].dport
+            src_port = paket[TCP].sport
+            hedef_ip = paket[IP].dst
+            kaynak_ip = paket[IP].src
 
-                # Yüksek portlarda (>10000) ilk kez trafik gözlemlenirse
-                if dst_port > 10000 and dst_port not in bilinen_portlar:
-                    if self.port_sayilari[dst_port] == 1:
-                        hedef_ip = paket[IP].dst
-                        kaynak_ip = paket[IP].src
-                        with self.lock:
-                            self.tehditler.append(
-                                f"PORT ANOMALİ: {kaynak_ip} -> {hedef_ip}:{dst_port} — alışılmadık port"
-                            )
+            self.port_sayilari[dst_port] += 1
+
+            # KATMAN 1: Bilinen güvenli portlara giden trafik → normal
+            if dst_port in self.BILINEN_PORTLAR:
+                return
+
+            # KATMAN 2: Sadece SYN paketlerini değerlendir
+            # ACK, SYN-ACK, FIN gibi paketler zaten mevcut bağlantıların parçası
+            if not (paket[TCP].flags & 0x02):  # SYN flag yoksa atla
+                return
+
+            # KATMAN 3: Eğer hedef port Windows ephemeral aralığındaysa
+            # bu genellikle response trafiğidir, atla
+            if self.EPHEMERAL_ALT <= dst_port <= self.EPHEMERAL_UST:
+                return
+
+            # KATMAN 4: Düşük portlar zaten bilinen portlar setinde;
+            # 1024-10000 arasındaki portlar çoğunlukla bilinen servislerdir
+            if dst_port <= 10000:
+                return
+
+            # KATMAN 5: Browser sürecinden geliyorsa → false positive, atla
+            if self._baglanti_browserdan_mi(paket):
+                return
+
+            # KATMAN 6: Rate limiting — aynı hedef ip:port için cooldown
+            simdi = time.time()
+            anahtar = (hedef_ip, dst_port)
+            son_alarm = self._port_alarm_zamanlari.get(anahtar, 0)
+            if simdi - son_alarm < self._PORT_ALARM_COOLDOWN:
+                return  # Cooldown süresi içinde, tekrar alarm verme
+
+            # İlk kez görülen port & tüm filtreleri geçti → ALARM
+            if self.port_sayilari[dst_port] <= 3:  # Nadir kullanılan port
+                self._port_alarm_zamanlari[anahtar] = simdi
+                with self.lock:
+                    self.tehditler.append(
+                        f"PORT ANOMALİ: {kaynak_ip}:{src_port} -> {hedef_ip}:{dst_port} "
+                        f"— Alışılmadık port (SYN, non-browser)"
+                    )
+
+        except Exception:
+            pass
+
+    # =====================================================
+    # UDP / QUIC ANOMALİ TESPİTİ
+    # =====================================================
+    def udp_anomali_kontrol(self, paket):
+        """
+        UDP trafiğinde anomali tespiti.
+        QUIC (UDP 443) normaldir, ancak bilinmeyen yüksek portlara
+        UDP trafiği C2 tüneli veya veri sızdırma (exfiltration) olabilir.
+        """
+        try:
+            if not (paket.haslayer(UDP) and paket.haslayer(IP)):
+                return
+
+            dst_port = paket[UDP].dport
+            hedef_ip = paket[IP].dst
+            kaynak_ip = paket[IP].src
+
+            # DNS (53) ve QUIC (443) normal
+            if dst_port in (53, 443, 80, 123, 67, 68):
+                return
+
+            # Bilinen güvenli portlar
+            if dst_port in self.BILINEN_PORTLAR:
+                return
+
+            # Ephemeral port aralığı atla
+            if self.EPHEMERAL_ALT <= dst_port <= self.EPHEMERAL_UST:
+                return
+
+            # Düşük portlar atla
+            if dst_port <= 10000:
+                return
+
+            # Browser trafiği atla
+            if self._baglanti_browserdan_mi(paket):
+                return
+
+            # Rate limiting
+            simdi = time.time()
+            anahtar = (hedef_ip, dst_port)
+            son_alarm = self._udp_alarm_zamanlari.get(anahtar, 0.0)
+            if simdi - son_alarm < self._PORT_ALARM_COOLDOWN:
+                return
+
+            # UDP port sayacı
+            self.udp_port_sayilari[dst_port] = self.udp_port_sayilari.get(dst_port, 0) + 1
+
+            if self.udp_port_sayilari[dst_port] <= 3:
+                self._udp_alarm_zamanlari[anahtar] = simdi
+                with self.lock:
+                    self.tehditler.append(
+                        f"UDP ANOMALİ: {kaynak_ip} -> {hedef_ip}:{dst_port} "
+                        f"— Alışılmadık UDP port (QUIC/C2 tüneli şüphesi)"
+                    )
         except Exception:
             pass
 
@@ -173,8 +356,11 @@ class AgKoklayici:
             # C2 Beacon Kontrolü
             self.c2_beacon_kontrol(paket)
 
-            # Port Anomali Kontrolü
+            # Port Anomali Kontrolü (TCP)
             self.port_anomali_kontrol(paket)
+
+            # UDP/QUIC Anomali Kontrolü
+            self.udp_anomali_kontrol(paket)
 
             # İçerik Analizi (DPI)
             if paket.haslayer(Raw):
@@ -235,4 +421,5 @@ class AgKoklayici:
             'dns_sorgu_sayisi': sum(self.dns_sorgu_sayilari.values()),
             'benzersiz_domain': len(self.dns_sorgu_sayilari),
             'aktif_port_sayisi': len(self.port_sayilari),
+            'browser_pid_sayisi': len(self._browser_pidler),
         }

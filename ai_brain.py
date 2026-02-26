@@ -20,6 +20,13 @@ class YapayZekaMotoru:
             "CPU (%)", "RAM (%)", "Disk I/O (MB/s)",
             "Ağ Trafiği (MB/s)", "Aktif İşlem Sayısı"
         ]
+        
+        # Süreç Bazlı AI Modeli
+        self.process_model_path = self.config.process_model_path
+        self.process_data_path = self.config.process_data_path
+        self.process_model = None
+        self.process_is_trained = False
+
         self.modeli_yukle()
 
     # =====================================================
@@ -46,6 +53,29 @@ class YapayZekaMotoru:
             birlesmis_veri = yeni_veri
 
         np.save(self.data_path, birlesmis_veri)
+        return birlesmis_veri
+
+    def process_veriyi_kaydet(self, yeni_veri_listesi):
+        """Süreç bazlı verileri boyut hatası olmadan kaydeder."""
+        if not yeni_veri_listesi:
+            return None
+
+        try:
+            yeni_veri = np.vstack(yeni_veri_listesi)
+        except Exception as e:
+            print(f"[HATA] Process veri işleme hatası: {e}")
+            return None
+
+        if os.path.exists(self.process_data_path):
+            try:
+                eski_veri = np.load(self.process_data_path, allow_pickle=True)
+                birlesmis_veri = np.vstack((eski_veri, yeni_veri))
+            except Exception:
+                birlesmis_veri = yeni_veri
+        else:
+            birlesmis_veri = yeni_veri
+
+        np.save(self.process_data_path, birlesmis_veri)
         return birlesmis_veri
 
     # =====================================================
@@ -109,6 +139,51 @@ class YapayZekaMotoru:
                 self.is_trained = False
         else:
             self.is_trained = False
+            
+        # Process Modelini de yükle
+        if os.path.exists(self.process_model_path):
+            try:
+                self.process_model = joblib.load(self.process_model_path)
+                self.process_is_trained = True
+            except Exception:
+                self.process_is_trained = False
+        else:
+            self.process_is_trained = False
+
+    # =====================================================
+    # SÜREÇ BAZLI EĞİTİM (PROCESS-LEVEL AI)
+    # =====================================================
+    def process_egit(self, process_veri_listesi):
+        """Process düzeyinde AI modelini eğitir."""
+        if not process_veri_listesi:
+            return
+            
+        tum_veri = self.process_veriyi_kaydet(process_veri_listesi)
+
+        if tum_veri is None or len(tum_veri) < 20: # En az 20 process örneği
+            return
+
+        contamination = self.config.ai_contamination
+        if len(tum_veri) > 500:
+            contamination = max(0.005, contamination * 0.8)
+        elif len(tum_veri) < 50:
+            contamination = min(0.05, contamination * 1.5)
+
+        self.process_model = Pipeline([
+            ('scaler', StandardScaler()),
+            ('model', IsolationForest(
+                n_estimators=100,
+                contamination=contamination,
+                random_state=42,
+                max_features=1.0,
+                bootstrap=True
+            ))
+        ])
+
+        self.process_model.fit(tum_veri)
+        joblib.dump(self.process_model, self.process_model_path)
+        self.process_is_trained = True
+        print(f"[+] Yeni Process AI Modeli Kaydedildi: {len(tum_veri)} örnek.")
 
     # =====================================================
     # ANALİZ
@@ -120,6 +195,17 @@ class YapayZekaMotoru:
         try:
             tahmin = self.model.predict(veri_vektoru)
             skor = self.model.decision_function(veri_vektoru)
+            return tahmin[0], skor[0]
+        except Exception:
+            return 1, 0.0
+
+    def process_analiz_et(self, process_vektoru):
+        """Süreç verisini analiz eder, tahmin ve skor döner."""
+        if not self.process_is_trained or self.process_model is None:
+            return 1, 0.0
+        try:
+            tahmin = self.process_model.predict(process_vektoru)
+            skor = self.process_model.decision_function(process_vektoru)
             return tahmin[0], skor[0]
         except Exception:
             return 1, 0.0

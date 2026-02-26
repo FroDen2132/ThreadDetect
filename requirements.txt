@@ -1,9 +1,20 @@
-psutil>=5.9.0
-numpy>=1.21.0
-scikit-learn>=1.0.0
-joblib>=1.1.0
-scapy>=2.5.0
-yara-python>=4.2.0
-matplotlib>=3.5.0
-colorama>=0.4.6
-watchdog>=3.0.0
+# ==========================================================
+# ThreadDetector v2.0 - Bağımlılıklar (Requirements)
+# ==========================================================
+
+# Sistem İzleme ve Yönetimi (Core System)
+psutil>=5.9.0         # İşlem ve sistem kaynakları kullanımı ölçümü
+watchdog>=3.0.0       # Dosya sistemi değişimlerini canlı izleme (Ransomware tespiti)
+colorama>=0.4.6       # Renkli ve okunabilir komut satırı çıktıları
+
+# Yapay Zeka ve Veri Bilimi (AI & Data Science)
+numpy>=1.21.0         # Özellik çıkarımı (Feature Engineering)
+scikit-learn>=1.0.0   # Anormallik Tespiti (Isolation Forest)
+joblib>=1.1.0         # AI model kaydetme/yükleme (Persistence)
+matplotlib>=3.5.0     # İsteğe bağlı grafik / metrik gösterimi
+
+# Tehdit İstihbaratı ve Dinamik Analiz (Threat & Dynamic Analysis)
+yara-python>=4.2.0    # Statik ikili (binary) tarama ve imza doğrulama
+scapy>=2.5.0          # Ağ trafiği koklama (Packet sniffing - DNS, C2 tespiti)
+frida-tools>=1.2.0    # Komut satırı araçları ve Frida motoru
+frida>=17.0.0         # Python üzerinden API Hooking ve dinamik çalışma zamanı modifikasyonu

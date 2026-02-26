@@ -1,6 +1,12 @@
 # config.py - MERKEZİ YAPILANDIRMA SİSTEMİ
+# Dataclass varsayılanları + config.json harici override desteği
 from dataclasses import dataclass, field
 from typing import List
+import json
+import os
+
+
+CONFIG_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 @dataclass
 class Config:
@@ -9,6 +15,8 @@ class Config:
     # --- AI MODEL PARAMETRELERİ ---
     model_path: str = "sentinel_model.pkl"
     data_path: str = "normal_veri_havuzu.npy"
+    process_model_path: str = "process_model.pkl"
+    process_data_path: str = "process_veri_havuzu.npy"
     ai_n_estimators: int = 200
     ai_contamination: float = 0.01
     ai_egitim_suresi: int = 20  # saniye
@@ -73,12 +81,30 @@ class Config:
     dll_monitor_aktif: bool = True
     dll_tarama_araligi: int = 10  # saniye
 
+    # --- API İZLEME (FRIDA) ---
+    api_monitor_aktif: bool = True
+    api_monitor_risk_esigi: float = 100.0  # Bu skoru aşan işlemlere Frida bağlanır
+    api_monitor_hooks: List[dict] = field(default_factory=list)
+    # ↑ Boş bırakılırsa api_monitor.py'deki 35+ yerleşik hook kullanılır.
+    #   Sadece özel hook listesi istiyorsanız buraya yazın.
+
     # --- PROCESS İZLEME GENİŞLETİLMİŞ ---
+    # İzlenmeyecek (güvenli) süreç adları
     ignore_process_names: List[str] = field(default_factory=lambda: [
         "System Idle Process", "System", "Registry", "Memory Compression",
         "WmiPrvSE.exe", "svchost.exe", "MsMpEng.exe", "SearchApp.exe", "smss.exe",
         "csrss.exe", "wininit.exe", "winlogon.exe", "lsass.exe", "services.exe",
-        "fontdrvhost.exe", "dwm.exe",
+        "fontdrvhost.exe", "dwm.exe", "msedge.exe",
+    ])
+
+    # İzin verilen dosya uzantıları (Ransomware/Dropper alarmlarından muaf)
+    whitelist_extensions: List[str] = field(default_factory=lambda: [
+        ".tmp", ".log", ".cache", ".bak", ".swp",
+    ])
+
+    # İzin verilen dizin yolları (Bu dizinlerdeki işlemler güvenli kabul edilir)
+    whitelist_paths: List[str] = field(default_factory=lambda: [
+        
     ])
 
     # LOLBins - Living Off The Land Binaries (Meşru araçlar kötü amaçla kullanılabilir)
@@ -94,6 +120,20 @@ class Config:
     # --- GENEL ---
     max_riskli_islem: int = 15
     debug_mode: bool = False
+    oturum_suresi: int = 0  # 0 = sınırsız, >0 = saniye cinsinden otomatik durma
+
+    def __post_init__(self):
+        """config.json varsa, içindeki değerlerle varsayılanları override et."""
+        if os.path.exists(CONFIG_JSON_PATH):
+            try:
+                with open(CONFIG_JSON_PATH, 'r', encoding='utf-8') as f:
+                    overrides = json.load(f)
+                for key, value in overrides.items():
+                    if hasattr(self, key):
+                        setattr(self, key, value)
+                print(f"[+] Harici yapılandırma yüklendi: {CONFIG_JSON_PATH}")
+            except Exception as e:
+                print(f"[-] config.json yükleme hatası: {e}")
 
     def __repr__(self):
         return (
@@ -102,5 +142,6 @@ class Config:
             f"  Thresholds: cpu={self.cpu_threshold}%, ram={self.ram_threshold}%, risk={self.risk_threshold}\n"
             f"  YARA: {self.yara_kural_dosyasi}\n"
             f"  Logging: dir={self.log_dir}, max={self.log_max_bytes // 1024 // 1024}MB\n"
+            f"  Duration: {'sınırsız' if self.oturum_suresi == 0 else f'{self.oturum_suresi}sn'}\n"
             f")"
         )
